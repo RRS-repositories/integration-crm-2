@@ -162,6 +162,20 @@ pool.on('error', (err, client) => {
                         ALTER TABLE contacts ADD COLUMN intake_lender TEXT;
                     END IF;
 
+                    -- Add lead tracking columns for Zapier database polling
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contacts' AND column_name='lead_status') THEN
+                        ALTER TABLE contacts ADD COLUMN lead_status VARCHAR(100);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contacts' AND column_name='intake_via') THEN
+                        ALTER TABLE contacts ADD COLUMN intake_via VARCHAR(50);
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contacts' AND column_name='zapier_processed') THEN
+                        ALTER TABLE contacts ADD COLUMN zapier_processed BOOLEAN DEFAULT FALSE;
+                    END IF;
+                    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contacts' AND column_name='zapier_processed_at') THEN
+                        ALTER TABLE contacts ADD COLUMN zapier_processed_at TIMESTAMP;
+                    END IF;
+
                     -- Add previous address columns to contacts table
                      IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='contacts' AND column_name='previous_address_line_1') THEN
                         ALTER TABLE contacts ADD COLUMN previous_address_line_1 TEXT;
@@ -2330,6 +2344,7 @@ app.post('/api/submit-page1', async (req, res) => {
                         lender_type: lender_type || 'General',
                         contact_id: contactId,
                         lender_selection_url: uniqueLink,
+                        signature_url: signatureUrl,
                         submitted_at: new Date().toISOString()
                     });
 
@@ -2354,6 +2369,7 @@ app.post('/api/submit-page1', async (req, res) => {
                         lender_type: 'General',
                         contact_id: contactId,
                         lender_selection_url: '',
+                        signature_url: signatureUrl,
                         submitted_at: new Date().toISOString()
                     });
                 }
@@ -5588,6 +5604,141 @@ app.get('/api/contacts/:id/combined-timeline', async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 });
+
+// ============================================================================
+// ZAPIER DATABASE POLLING ENDPOINTS
+// These endpoints allow Zapier to fetch new leads from database instead of webhook
+// ============================================================================
+
+// GET /api/zapier/new-leads - Fetch unprocessed leads for Zapier
+// Zapier should poll this endpoint every X minutes
+app.get('/api/zapier/new-leads', async (req, res) => {
+    try {
+        // Optional: Add API key authentication
+        const apiKey = req.headers['x-api-key'];
+        if (process.env.ZAPIER_API_KEY && apiKey !== process.env.ZAPIER_API_KEY) {
+            return res.status(401).json({ error: 'Invalid API key' });
+        }
+
+        // Fetch contacts that haven't been processed by Zapier yet
+        // Only fetch those with intake_lender (meaning they submitted lender selection)
+        const result = await pool.query(`
+            SELECT
+                c.id as contact_id,
+                c.first_name,
+                c.last_name,
+                CONCAT(c.first_name, ' ', c.last_name) as full_name,
+                c.email,
+                c.phone,
+                c.dob as date_of_birth,
+                c.address_line_1 as street_address,
+                c.city,
+                c.postal_code,
+                c.intake_lender as lender_type,
+                c.intake_via,
+                c.lead_status,
+                c.signature_url,
+                c.unique_form_link as lender_selection_url,
+                c.created_at as submitted_at
+            FROM contacts c
+            WHERE c.zapier_processed = FALSE OR c.zapier_processed IS NULL
+            AND c.intake_lender IS NOT NULL
+            ORDER BY c.created_at ASC
+            LIMIT 10
+        `);
+
+        // Return the leads in the format Zapier expects
+        res.json({
+            success: true,
+            count: result.rows.length,
+            leads: result.rows
+        });
+    } catch (error) {
+        console.error('[Zapier] Error fetching new leads:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST /api/zapier/mark-processed - Mark a lead as processed by Zapier
+app.post('/api/zapier/mark-processed', async (req, res) => {
+    try {
+        // Optional: Add API key authentication
+        const apiKey = req.headers['x-api-key'];
+        if (process.env.ZAPIER_API_KEY && apiKey !== process.env.ZAPIER_API_KEY) {
+            return res.status(401).json({ error: 'Invalid API key' });
+        }
+
+        const { contact_id } = req.body;
+
+        if (!contact_id) {
+            return res.status(400).json({ error: 'contact_id is required' });
+        }
+
+        await pool.query(`
+            UPDATE contacts
+            SET zapier_processed = TRUE,
+                zapier_processed_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+        `, [contact_id]);
+
+        console.log(`✅ [Zapier] Marked contact ${contact_id} as processed`);
+        res.json({ success: true, contact_id });
+    } catch (error) {
+        console.error('[Zapier] Error marking lead as processed:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET /api/zapier/lead/:id - Fetch a specific lead by ID (for Zapier lookup)
+app.get('/api/zapier/lead/:id', async (req, res) => {
+    try {
+        // Optional: Add API key authentication
+        const apiKey = req.headers['x-api-key'];
+        if (process.env.ZAPIER_API_KEY && apiKey !== process.env.ZAPIER_API_KEY) {
+            return res.status(401).json({ error: 'Invalid API key' });
+        }
+
+        const { id } = req.params;
+
+        const result = await pool.query(`
+            SELECT
+                c.id as contact_id,
+                c.first_name,
+                c.last_name,
+                CONCAT(c.first_name, ' ', c.last_name) as full_name,
+                c.email,
+                c.phone,
+                c.dob as date_of_birth,
+                c.address_line_1 as street_address,
+                c.city,
+                c.postal_code,
+                c.intake_lender as lender_type,
+                c.intake_via,
+                c.lead_status,
+                c.signature_url,
+                c.unique_form_link as lender_selection_url,
+                c.created_at as submitted_at,
+                c.zapier_processed,
+                c.zapier_processed_at
+            FROM contacts c
+            WHERE c.id = $1
+        `, [id]);
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Lead not found' });
+        }
+
+        res.json({
+            success: true,
+            lead: result.rows[0]
+        });
+    } catch (error) {
+        console.error('[Zapier] Error fetching lead:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// ============================================================================
 
 // --- BACKGROUND WORKER: PROCESS PENDING LOAs ---
 // Listen on 0.0.0.0 for cloud deployment (EC2, Docker, etc.)

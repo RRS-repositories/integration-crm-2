@@ -194,6 +194,21 @@ async function initDb() {
       ALTER TABLE contacts ADD COLUMN IF NOT EXISTS signature_2_url TEXT;
     `);
 
+    // Add lead tracking columns for Zapier database polling
+    console.log('Adding lead tracking columns to contacts...');
+    await pool.query(`
+      ALTER TABLE contacts ADD COLUMN IF NOT EXISTS lead_status VARCHAR(100);
+    `);
+    await pool.query(`
+      ALTER TABLE contacts ADD COLUMN IF NOT EXISTS intake_via VARCHAR(50);
+    `);
+    await pool.query(`
+      ALTER TABLE contacts ADD COLUMN IF NOT EXISTS zapier_processed BOOLEAN DEFAULT FALSE;
+    `);
+    await pool.query(`
+      ALTER TABLE contacts ADD COLUMN IF NOT EXISTS zapier_processed_at TIMESTAMP;
+    `);
+
     // Add extended claim fields to cases table
     console.log('Adding extended claim fields to cases...');
     await pool.query(`
