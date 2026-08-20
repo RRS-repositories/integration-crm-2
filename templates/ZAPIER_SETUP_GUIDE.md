@@ -149,7 +149,7 @@ For each PDF generated:
 2. Search for **"Amazon S3"**
 3. Select **"Upload File"**
 4. Connect your AWS account with credentials:
-   - Access Key: `AKIAXP5WIHQE2JUTVVIT`
+   - Access Key: `<AWS_ACCESS_KEY_ID — set via env, rotate the exposed one>`
    - Secret Key: (from your .env)
    - Region: `eu-north-1`
 
